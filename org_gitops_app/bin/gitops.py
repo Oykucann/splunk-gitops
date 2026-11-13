@@ -120,16 +120,28 @@ def load_conf():
 
 
 # ---------------------------------------------------------------- HTTP
-def http(url, method="GET", data=None, headers=None, ctx=None, timeout=60, max_bytes=None):
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not follow redirects: a redirect from the GitLab API means a wrong gitlab_url (web UI,
+    sign-in/SSO page, proxy), and following it could send the PRIVATE-TOKEN header elsewhere."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def http(url, method="GET", data=None, headers=None, ctx=None, timeout=60, max_bytes=None, redirects=True):
+    """Returns (status, body). With redirects=False a 3xx is returned as is; its body is replaced by
+    b"Location: <target>" so the caller can report where it was sent."""
     body = urllib.parse.urlencode(data, doseq=True).encode() if isinstance(data, dict) else data
     req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx), _NoRedirect()) if not redirects else None
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+        with (opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, context=ctx, timeout=timeout)) as r:
             raw = r.read(max_bytes + 1) if max_bytes else r.read()
             if max_bytes and len(raw) > max_bytes:
                 raise GitopsError("response exceeded the %d MB limit: %s" % (max_bytes // 1048576, url.split("?")[0]))
             return r.status, raw
     except urllib.error.HTTPError as e:
+        if not redirects and 300 <= e.code < 400:
+            return e.code, ("Location: %s" % (e.headers.get("Location") or "?")).encode()
         return e.code, e.read()
 
 
@@ -202,16 +214,31 @@ class GitLab:
 
     def get(self, path, raw=False, ok404=False):
         code, body = http(self.base + path, headers=self.h, ctx=self.ctx, timeout=self.timeout,
-                          max_bytes=self.max_bytes if raw else None)
+                          max_bytes=self.max_bytes if raw else None, redirects=False)
         if code == 404 and ok404:
             return None
+        if 300 <= code < 400:
+            to = body.decode("utf-8", "replace")[len("Location: "):].split("?")[0]
+            log.error(kv(event="gitlab_error", status=code, path=path.split("?")[0], redirect_to=to))
+            raise GitopsError("GitLab API redirected (HTTP %s) to %s: gitlab_url must be the GitLab root, e.g. "
+                              "https://gitlab.company.local, reachable without SSO/proxy sign-in; the API is %s"
+                              % (code, to, self.base))
         if code != 200:
             hint = {401: "token invalid, revoked or expired",
                     403: "insufficient token scope (read_api required) or role is not Reporter",
                     404: "project/branch/commit not found, or the token has no access to the project"}.get(code, "")
             log.error(kv(event="gitlab_error", status=code, path=path.split("?")[0], hint=hint))
             raise GitopsError("GitLab %s -> HTTP %s %s" % (path.split("?")[0], code, hint))
-        return body if raw else json.loads(body)
+        if raw:
+            return body
+        try:
+            return json.loads(body)
+        except ValueError:
+            snippet = re.sub(r"\s+", " ", body[:120].decode("utf-8", "replace")).strip()
+            log.error(kv(event="gitlab_error", status=code, path=path.split("?")[0], body_start=snippet))
+            raise GitopsError("GitLab %s returned HTTP %s but not JSON (starts with: %r): gitlab_url probably points to "
+                              "the web UI, a sign-in/SSO page or a proxy instead of GitLab; the API is %s"
+                              % (path.split("?")[0], code, snippet[:60], self.base))
 
     def head_sha(self):
         return self.get("/projects/%s/repository/branches/%s" % (self.pid, urllib.parse.quote(self.branch, safe="")))["commit"]["id"]
