@@ -106,6 +106,14 @@ def load_conf():
     for k in ("host_id", "role", "gitlab_url", "project"):
         if not c.get(k):
             raise GitopsError("gitops.conf: %s is empty (set it in local/gitops.conf)" % k)
+    c["project"] = c["project"].strip().strip("/")
+    if "://" in c["project"] or "/-/" in "/" + c["project"] + "/":
+        raise GitopsError("gitops.conf: project %r is a URL; use only the project path, e.g. group/subgroup/repo "
+                          "(the part of the project URL before /-/), or the numeric project ID" % c["project"])
+    c["gitlab_url"] = c["gitlab_url"].strip().rstrip("/")
+    if re.search(r"\s", c["project"]):
+        raise GitopsError("gitops.conf: project %r looks like the display name; use the project path "
+                          "(group/subgroup/repo, as in the project URL) or the numeric project ID" % c["project"])
     if c["role"] not in ROLE_DESTS:
         raise GitopsError("gitops.conf: invalid role %s (cm|ds|deployer|sh)" % c["role"])
     b = lambda k: c.get(k, "false").strip().lower() in ("1", "true", "yes")
@@ -241,7 +249,31 @@ class GitLab:
                               % (path.split("?")[0], code, snippet[:60], self.base))
 
     def head_sha(self):
-        return self.get("/projects/%s/repository/branches/%s" % (self.pid, urllib.parse.quote(self.branch, safe="")))["commit"]["id"]
+        br = self.get("/projects/%s/repository/branches/%s" % (self.pid, urllib.parse.quote(self.branch, safe="")), ok404=True)
+        if br is None:
+            raise GitopsError(self.why_404())
+        return br["commit"]["id"]
+
+    def why_404(self):
+        """The branch was not found: ask for the project itself to tell the causes apart."""
+        p = self.get("/projects/%s" % self.pid, ok404=True)
+        if p is None:
+            who, visible = "?", "?"
+            try:
+                who = (self.get("/user", ok404=True) or {}).get("username", "?")
+                vis = self.get("/projects?membership=true&simple=true&per_page=10", ok404=True) or []
+                visible = ", ".join("%s (id %s)" % (x.get("path_with_namespace"), x.get("id")) for x in vis) or "none"
+            except GitopsError:
+                pass
+            return ("project %s not found, or this token cannot see it. Token user: %s; projects this token can see: %s. "
+                    "A project access token only works for its own project (its user is project_<id>_bot_...); "
+                    "check the project path/ID, the token's project and its role (Reporter or higher)"
+                    % (urllib.parse.unquote(self.pid), who, visible))
+        if p.get("empty_repo"):
+            return "project %s is reachable but its repository is empty: push the skeleton to it first" % p.get("path_with_namespace")
+        return ("project %s is reachable but has no branch %r; its default branch is %r (set branch = %s in "
+                "local/gitops.conf, or push %s)" % (p.get("path_with_namespace"), self.branch, p.get("default_branch"),
+                                                     p.get("default_branch"), self.branch))
 
     def resolve(self, ref):
         return self.get("/projects/%s/repository/commits/%s" % (self.pid, urllib.parse.quote(ref, safe="")))["id"] if not re.fullmatch(r"[0-9a-f]{40}", ref) else ref
@@ -290,7 +322,7 @@ def safe_extract(data, dest):
     os.rename(tmp, dest)
 
 
-def get_release(gl, sha):
+def get_release(gl, sha, keep=3):
     rel = os.path.join(VAR_DIR, "releases", sha)
     if os.path.exists(os.path.join(rel, ".complete")):
         return rel
@@ -298,9 +330,9 @@ def get_release(gl, sha):
     data = gl.archive(sha)
     safe_extract(data, rel)
     open(os.path.join(rel, ".complete"), "w").close()
-    # keep the last 3 releases
+    # keep the last N releases (release_keep in gitops.conf, at least 1)
     rels = sorted((os.path.join(VAR_DIR, "releases", d) for d in os.listdir(os.path.join(VAR_DIR, "releases"))), key=os.path.getmtime)
-    for old in rels[:-3]:
+    for old in rels[:-max(1, keep)]:
         if old != rel:
             shutil.rmtree(old, ignore_errors=True)
     log.info(kv(event="release_downloaded", sha=sha, bytes=len(data)))
@@ -767,7 +799,7 @@ def cmd_status(conf, sp, st):
     gl = GitLab(conf, sp.get_secret("gitlab_token"))
     meta = None
     try:
-        rel = get_release(gl, gl.head_sha())
+        rel = get_release(gl, gl.head_sha(), int(conf.get("release_keep", "3")))
         _, meta = load_inventory(rel, conf, conf["_extra_protected"])
         log.info(kv(event="inventory", file=meta["file"], path=meta["base"], cm_ha_availability=meta["cm_ha"]))
     except GitopsError as e:
@@ -799,7 +831,7 @@ def run(conf, args, sp):
     gl = GitLab(conf, sp.get_secret("gitlab_token"))
     token_check(conf, gl)  # on every run: warn on screen and in the log 30 days before expiry
     sha = gl.resolve(args.sha) if args.sha else gl.head_sha()
-    rel = get_release(gl, sha)
+    rel = get_release(gl, sha, int(conf.get("release_keep", "3")))
     global BASE
     want, meta = load_inventory(rel, conf, conf["_extra_protected"])
     BASE = meta["base"]
