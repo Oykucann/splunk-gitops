@@ -99,17 +99,17 @@ def load_conf():
             with open(p) as f:
                 cp.read_string(f.read(), source=p)
     if not cp.has_section("gitops"):
-        raise GitopsError("gitops.conf icinde [gitops] yok")
+        raise GitopsError("no [gitops] stanza in gitops.conf")
     c = dict(cp.items("gitops"))
     for k in ("host_id", "role", "gitlab_url", "project"):
         if not c.get(k):
-            raise GitopsError("gitops.conf: %s bos (local/gitops.conf'a yazin)" % k)
+            raise GitopsError("gitops.conf: %s is empty (set it in local/gitops.conf)" % k)
     if c["role"] not in ROLE_DESTS:
-        raise GitopsError("gitops.conf: role %s gecersiz (cm|ds|deployer|sh)" % c["role"])
+        raise GitopsError("gitops.conf: invalid role %s (cm|ds|deployer|sh)" % c["role"])
     b = lambda k: c.get(k, "false").strip().lower() in ("1", "true", "yes")
     c["inventory_file"] = (c.get("inventory_file") or INVENTORY_DEFAULT).strip().lstrip("/")
     if ".." in PurePosixPath(c["inventory_file"]).parts:
-        raise GitopsError("gitops.conf: inventory_file repo icinde bir yol olmali")
+        raise GitopsError("gitops.conf: inventory_file must be a path inside the repo")
     c["_allow_rolling_restart"] = b("allow_rolling_restart")
     c["_require_rf_sf_met"] = b("require_rf_sf_met")
     c["_splunk_verify_tls"] = b("splunk_verify_tls")
@@ -125,7 +125,7 @@ def http(url, method="GET", data=None, headers=None, ctx=None, timeout=60, max_b
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
             raw = r.read(max_bytes + 1) if max_bytes else r.read()
             if max_bytes and len(raw) > max_bytes:
-                raise GitopsError("yanit %d MB sinirini asti: %s" % (max_bytes // 1048576, url.split("?")[0]))
+                raise GitopsError("response exceeded the %d MB limit: %s" % (max_bytes // 1048576, url.split("?")[0]))
             return r.status, raw
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -145,7 +145,7 @@ class Splunk:
     def login(self, user, pw):
         code, raw = http(self.uri + "/services/auth/login", "POST", {"username": user, "password": pw, "output_mode": "json"}, ctx=self.ctx)
         if code != 200:
-            raise GitopsError("Splunk girisi basarisiz (HTTP %s)" % code)
+            raise GitopsError("Splunk login failed (HTTP %s)" % code)
         self.key = json.loads(raw)["sessionKey"]
         self.user = user
 
@@ -174,9 +174,9 @@ class Splunk:
     def get_secret(self, name):
         code, d = self.req(self._pw_path(name), ok=None)
         if code == 404:
-            raise GitopsError("storage/passwords'te %s yok: once 'set-token' calistirin" % name)
+            raise GitopsError("%s not in storage/passwords: run 'set-token' first" % name)
         if code != 200:
-            raise GitopsError("storage/passwords okunamadi (HTTP %s); kullanicinin list_storage_passwords yetkisi var mi?" % code)
+            raise GitopsError("cannot read storage/passwords (HTTP %s); does the user have the list_storage_passwords capability?" % code)
         return d["entry"][0]["content"]["clear_password"]
 
     def set_secret(self, name, value):
@@ -185,7 +185,7 @@ class Splunk:
             self.req("/servicesNS/nobody/%s/storage/passwords" % APP_NAME, "POST",
                      {"name": name, "realm": APP_NAME, "password": value})
         elif code not in (200, 201):
-            raise GitopsError("token yazilamadi (HTTP %s)" % code)
+            raise GitopsError("cannot store the token (HTTP %s)" % code)
 
 
 class GitLab:
@@ -204,9 +204,9 @@ class GitLab:
         if code == 404 and ok404:
             return None
         if code != 200:
-            hint = {401: "token gecersiz, iptal edilmis ya da suresi dolmus",
-                    403: "token scope'u yetersiz (read_api gerekli) ya da role Reporter degil",
-                    404: "proje/branch/commit bulunamadi ya da token'in projeye erisimi yok"}.get(code, "")
+            hint = {401: "token invalid, revoked or expired",
+                    403: "insufficient token scope (read_api required) or role is not Reporter",
+                    404: "project/branch/commit not found, or the token has no access to the project"}.get(code, "")
             log.error(kv(event="gitlab_error", status=code, path=path.split("?")[0], hint=hint))
             raise GitopsError("GitLab %s -> HTTP %s %s" % (path.split("?")[0], code, hint))
         return body if raw else json.loads(body)
@@ -239,12 +239,12 @@ def safe_extract(data, dest):
         for m in members:
             p = PurePosixPath(m.name)
             if m.name.startswith("/") or ".." in p.parts:
-                raise GitopsError("arsivde guvensiz yol: %s" % m.name)
+                raise GitopsError("unsafe path in archive: %s" % m.name)
             if not (m.isfile() or m.isdir()):
-                raise GitopsError("arsivde link/ozel dosya: %s" % m.name)
+                raise GitopsError("link/special file in archive: %s" % m.name)
             tops.add(p.parts[0])
         if len(tops) != 1:
-            raise GitopsError("arsiv tek bir ust dizin icermiyor")
+            raise GitopsError("archive does not contain a single top-level directory")
         for m in members:
             parts = PurePosixPath(m.name).parts[1:]
             if not parts:
@@ -282,7 +282,7 @@ def _scalar(v, what):
     """Accept both `x` and `[x]` in YAML."""
     if isinstance(v, list):
         if len(v) != 1:
-            raise GitopsError("envanter: %s tek deger olmali" % what)
+            raise GitopsError("inventory: %s must be a single value" % what)
         v = v[0]
     return v
 
@@ -295,13 +295,13 @@ def _yesno(v, what):
         return True
     if isinstance(v, str) and v.strip().lower() in ("no", "false", "hayir"):
         return False
-    raise GitopsError("envanter: %s yes ya da no olmali (%r)" % (what, v))
+    raise GitopsError("inventory: %s must be yes or no (%r)" % (what, v))
 
 
 def _path(v, what):
     v = _scalar(v, what)
     if not isinstance(v, str) or not v.startswith("/"):
-        raise GitopsError("envanter: %s mutlak bir dizin olmali (%r)" % (what, v))
+        raise GitopsError("inventory: %s must be an absolute directory (%r)" % (what, v))
     return os.path.normpath(v)
 
 
@@ -311,49 +311,49 @@ def load_inventory(rel, conf, extra_protected, check_home=True):
     try:
         import yaml
     except ImportError:
-        raise GitopsError("PyYAML yok: Splunk python'unda 'import yaml' calismiyor")
+        raise GitopsError("PyYAML missing: 'import yaml' fails in Splunk's python")
     fn = conf.get("inventory_file") or INVENTORY_DEFAULT
     p = os.path.join(rel, fn)
     if not os.path.isfile(p):
-        raise GitopsError("repoda %s yok" % fn)
+        raise GitopsError("%s not found in the repo" % fn)
     try:
         with open(p) as f:
             t = yaml.safe_load(f)
     except yaml.YAMLError as e:
-        raise GitopsError("%s okunamadi: %s" % (fn, str(e).replace("\n", " ")))
+        raise GitopsError("cannot read %s: %s" % (fn, str(e).replace("\n", " ")))
     if not isinstance(t, dict) or t.get("version") != 1 or not isinstance(t.get("roles"), dict):
-        raise GitopsError("%s: 'version: 1' ve 'roles:' gerekli" % fn)
+        raise GitopsError("%s: 'version: 1' and 'roles:' are required" % fn)
     for k in t:
         if k not in ("version", "default_path", "roles"):
-            raise GitopsError("%s: bilinmeyen anahtar %s" % (fn, k))
+            raise GitopsError("%s: unknown key %s" % (fn, k))
     host, role = conf["host_id"], conf["role"]
     found = []
     for rname, r in t["roles"].items():
         if rname not in ROLE_DESTS or not isinstance(r, dict):
-            raise GitopsError("%s: bilinmeyen rol %s" % (fn, rname))
+            raise GitopsError("%s: unknown role %s" % (fn, rname))
         hosts = r.get("hosts") or []
         if isinstance(hosts, list):
             hosts = {h: {} for h in hosts}
         if not isinstance(hosts, dict):
-            raise GitopsError("%s: %s.hosts liste ya da sozluk olmali" % (fn, rname))
+            raise GitopsError("%s: %s.hosts must be a list or a mapping" % (fn, rname))
         role_keys = set(ROLE_DESTS[rname]) | {"hosts", "path"} | ({"cm_ha_availability"} if rname == "cm" else set())
         for k in r:
             if k not in role_keys:
-                raise GitopsError("%s: %s rolunde %s olamaz" % (fn, rname, k))
+                raise GitopsError("%s: role %s cannot have %s" % (fn, rname, k))
         if rname == "cm":
             if "cm_ha_availability" not in r:
-                raise GitopsError("%s: cm rolunde cm_ha_availability (yes|no) zorunlu" % fn)
+                raise GitopsError("%s: cm_ha_availability (yes|no) is required in the cm role" % fn)
             _yesno(r["cm_ha_availability"], "cm.cm_ha_availability")
         for h, hr in hosts.items():
             for k in (hr or {}):
                 if k not in set(ROLE_DESTS[rname]) | {"path"}:
-                    raise GitopsError("%s: %s icin %s olamaz" % (fn, h, k))
+                    raise GitopsError("%s: %s cannot have %s" % (fn, h, k))
         if host in hosts:
             found.append((rname, r, hosts[host] or {}))
     if not found:
-        raise GitopsError("%s'de bu host (%s) yok" % (fn, host))
+        raise GitopsError("this host (%s) is not in %s" % (host, fn))
     if len(found) > 1 or found[0][0] != role:
-        raise GitopsError("%s'de %s rolu %s, gitops.conf'ta %s" % (fn, host, ",".join(f[0] for f in found), role))
+        raise GitopsError("in %s the role of %s is %s, but gitops.conf says %s" % (fn, host, ",".join(f[0] for f in found), role))
     _, r, hr = found[0]
     # path: host > role > default_path
     if "path" in hr:
@@ -363,11 +363,11 @@ def load_inventory(rel, conf, extra_protected, check_home=True):
     elif "default_path" in t:
         base = _path(t["default_path"], "default_path")
     else:
-        raise GitopsError("%s: default_path yok" % fn)
+        raise GitopsError("%s: default_path missing" % fn)
     if check_home:
         here = os.path.realpath(os.path.join(SPLUNK_HOME, "etc"))
         if os.path.realpath(os.path.join(base, "etc")) != here:
-            raise GitopsError("%s: %s icin path %s, ama bu Splunk %s altinda calisiyor" % (fn, host, base, SPLUNK_HOME))
+            raise GitopsError("%s: path for %s is %s, but this Splunk runs under %s" % (fn, host, base, SPLUNK_HOME))
     meta = {"base": base, "file": fn,
             "cm_ha": _yesno(r["cm_ha_availability"], "cm.cm_ha_availability") if role == "cm" else None}
     want = {}
@@ -375,21 +375,21 @@ def load_inventory(rel, conf, extra_protected, check_home=True):
         apps = list(r.get(d) or []) + [a for a in (hr.get(d) or []) if a not in (r.get(d) or [])]
         for a in apps:
             if isinstance(a, str) and (a == APP_NAME or a in PROTECTED or a in extra_protected or a.startswith("splunk_") or a.startswith("Splunk_SA_")):
-                raise GitopsError("korunan app yonetilemez: %s" % a)
+                raise GitopsError("protected app cannot be managed: %s" % a)
             if not isinstance(a, str) or not APP_NAME_RE.match(a):
-                raise GitopsError("gecersiz app adi: %r" % a)
+                raise GitopsError("invalid app name: %r" % a)
             src = os.path.join(rel, "apps", a)
             if not os.path.isdir(src):
-                raise GitopsError("%s'deki %s repoda apps/ altinda yok" % (fn, a))
+                raise GitopsError("%s lists %s, but it is not under apps/ in the repo" % (fn, a))
             if d == "etc_apps":
                 for pres in PRESERVE["etc_apps"]:
                     if os.path.exists(os.path.join(src, pres)):
-                        raise GitopsError("%s: etc/apps'e gidecek app'te %s olamaz (default/ kullanin)" % (a, pres))
+                        raise GitopsError("%s: an app going to etc/apps must not contain %s (use default/)" % (a, pres))
         if len(set(apps)) != len(apps):
-            raise GitopsError("%s listesinde tekrar eden app var" % d)
+            raise GitopsError("duplicate app in the %s list" % d)
         want[d] = apps
     if role == "cm" and want.get("manager_apps") and want.get("master_apps"):
-        raise GitopsError("%s: %s icin manager_apps ve master_apps birlikte kullanilamaz; birini secin" % (fn, host))
+        raise GitopsError("%s: manager_apps and master_apps cannot be used together for %s; pick one" % (fn, host))
     return want, meta
 
 
@@ -485,7 +485,7 @@ def backup(conf, d, dd, apps, old_sha, new_sha):
     free = shutil.disk_usage(bdir).free
     min_free = int(conf.get("min_free_mb", "1024")) * 1048576
     if free - need < min_free:
-        raise GitopsError("yedek dizininde yer yok: bos %d MB, gereken %d MB + %d MB pay" % (free // 1048576, need // 1048576, min_free // 1048576))
+        raise GitopsError("not enough space in the backup directory: %d MB free, %d MB needed + %d MB margin" % (free // 1048576, need // 1048576, min_free // 1048576))
     name = "%s_%s_to_%s.tgz" % (time.strftime("%Y%m%d-%H%M%S"), (old_sha or "none")[:8], new_sha[:8])
     p = os.path.join(bdir, name)
     with tarfile.open(p + ".partial", "w:gz") as tf:
@@ -530,7 +530,7 @@ def restart_hint(rel, items):
     confs = set()
     for i in items:
         if i["op"] == "remove":
-            confs.add("(app silindi)")
+            confs.add("(app removed)")
             continue
         for r, _, fs in os.walk(os.path.join(rel, "apps", i["app"])):
             for f in fs:
@@ -560,7 +560,7 @@ def cm_gate(conf, sp, ha):
     cfg = sp.content("/services/cluster/config")
     mode, sw = cfg.get("mode"), (cfg.get("manager_switchover_mode") or "disabled")
     if mode not in ("manager", "master"):
-        raise GitopsError("bu sunucu cluster manager degil (mode=%s)" % mode)
+        raise GitopsError("this server is not a cluster manager (mode=%s)" % mode)
     redundant = sw != "disabled"
     code = cm_ha_status(conf, sp) if redundant else None
     state = ("active" if code == 200 else "standby" if code == 503 else "ha_active_status=%s" % code) if redundant else "single"
@@ -568,16 +568,16 @@ def cm_gate(conf, sp, ha):
         return False, "%s (switchover=%s)" % (state, sw)
     if ha:
         if not redundant:
-            raise GitopsError("envanterde cm_ha_availability=yes ama bu CM'de redundancy yok (manager_switchover_mode=disabled); envanteri no yapin")
+            raise GitopsError("inventory says cm_ha_availability=yes but this CM has no redundancy (manager_switchover_mode=disabled); set it to no")
         if code in (200, 503):
             return code == 200, state
-        raise GitopsError("ha_active_status beklenmeyen yanit: HTTP %s" % code)
+        raise GitopsError("unexpected ha_active_status response: HTTP %s" % code)
     if redundant:
         if code == 200:
             log.warning(kv(event="cm_ha_mismatch", switchover=sw,
-                           msg="envanter no ama bu CM aktif-pasif ciftin aktifi; esi standby oldugu icin o calismayi durdurur. Envanteri yes yapin"))
+                           msg="inventory says no but this CM is the active member of an active-passive pair; its standby partner will stop. Set the inventory to yes"))
             return True, "active"
-        raise GitopsError("envanterde cm_ha_availability=no ama bu CM aktif-pasif ciftin parcasi (switchover=%s, %s); envanteri yes yapin" % (sw, state))
+        raise GitopsError("inventory says cm_ha_availability=no but this CM is part of an active-passive pair (switchover=%s, %s); set it to yes" % (sw, state))
     return True, "single"
 
 
@@ -590,14 +590,14 @@ def cm_bundle(sp):
 def action_cm(conf, sp, timeout=900):
     c, active, latest, _ = cm_bundle(sp)
     if c.get("maintenance_mode"):
-        raise GitopsError("CM maintenance mode'da; apply yapilmadi")
+        raise GitopsError("CM is in maintenance mode; no apply done")
     if c.get("rolling_restart_flag"):
-        raise GitopsError("rolling restart suruyor; apply yapilmadi")
+        raise GitopsError("rolling restart in progress; no apply done")
     if c.get("apply_bundle_status", {}).get("status") not in (None, "None", ""):
-        raise GitopsError("bundle islemi suruyor: %s" % c["apply_bundle_status"])
+        raise GitopsError("bundle operation in progress: %s" % c["apply_bundle_status"])
     gen = sp.content("/services/cluster/manager/generation")
     if conf["_require_rf_sf_met"] and not (gen.get("replication_factor_met") in ("1", 1, True) and gen.get("search_factor_met") in ("1", 1, True)):
-        raise GitopsError("RF/SF met degil; apply yapilmadi")
+        raise GitopsError("RF/SF not met; no apply done")
     # Behaviour measured in the lab (9.4.12):
     #  - If manager-apps DIFFERS from the active bundle, validate updates last_validated_bundle
     #    (checksum + timestamp); status briefly shows "Bundle validation is in progress".
@@ -619,17 +619,17 @@ def action_cm(conf, sp, timeout=900):
             log.info(kv(event="cm_apply", result="unchanged", bundle=active, saw_validation=seen_busy))
             return {"bundle": active, "result": "unchanged"}
         if time.time() - t0 > 300:
-            raise GitopsError("bundle validation 300 sn icinde bitmedi")
+            raise GitopsError("bundle validation did not finish within 300 s")
     if validated == active:
         log.info(kv(event="cm_apply", result="unchanged", bundle=active))
         return {"bundle": active, "result": "unchanged"}
     st = c.get("last_validated_bundle") or {}
     if str(st.get("is_valid_bundle")).lower() in ("0", "false"):
-        raise GitopsError("bundle gecersiz: %s" % json.dumps(c.get("apply_bundle_status") or st)[:300])
+        raise GitopsError("bundle invalid: %s" % json.dumps(c.get("apply_bundle_status") or st)[:300])
     restart = str(c.get("last_check_restart_bundle_result")).lower() in ("1", "true")
     log.info(kv(event="cm_validate", bundle=validated, active=active, restart_required=restart))
     if restart and not conf["_allow_rolling_restart"]:
-        raise GitopsError("bundle peer'larda restart gerektiriyor ve allow_rolling_restart=false; elle apply edin")
+        raise GitopsError("bundle requires a peer restart and allow_rolling_restart=false; apply it by hand")
     sp.req("/services/cluster/manager/control/default/apply", "POST", {})
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -642,11 +642,11 @@ def action_cm(conf, sp, timeout=900):
             down = [p.get("label") for p in allp if p.get("status") != "Up"]
             if down or not allp:
                 log.warning(kv(event="cm_apply_peers", up=len(peers), not_up=",".join(map(str, down)) or None,
-                               msg="Up olmayan peer'lar geri geldiginde bundle'i CM'den alir" if down else "CM'de hic peer yok"))
+                               msg="peers that are not Up get the bundle from the CM when they come back" if down else "the CM has no peers"))
             _, active, _, _ = cm_bundle(sp)
             log.info(kv(event="cm_apply", result="applied", bundle=validated, peers=len(peers), secs=int(time.time() - t0)))
             return {"bundle": validated, "result": "applied", "peers": len(peers)}
-    raise GitopsError("bundle %d sn icinde tum peer'lara ulasmadi (%d/%d)" % (timeout, ok, len(peers)))
+    raise GitopsError("bundle did not reach all peers within %d s (%d/%d)" % (timeout, ok, len(peers)))
 
 
 def action_ds(conf, sp):
@@ -660,7 +660,7 @@ def action_ds(conf, sp):
 def action_deployer(conf, sp):
     target = conf.get("shc_target_uri")
     if not target:
-        raise GitopsError("gitops.conf: shc_target_uri bos")
+        raise GitopsError("gitops.conf: shc_target_uri is empty")
     data = {"target": target, "action": "all"}
     # a push fails while members are in a rolling restart (including one started by the previous push): wait and retry
     limit = int(conf.get("deployer_retry_secs", "900")); t0 = time.time(); n = 0
@@ -672,11 +672,11 @@ def action_deployer(conf, sp):
         msg = json.dumps(d)[:400]
         busy = any(x in msg for x in ("Network-layer", "restart", "not ready", "Connection refused", "captain"))
         if not busy or time.time() - t0 > limit:
-            raise GitopsError("deployer push HTTP %s (deneme %d): %s" % (code, n, msg))
+            raise GitopsError("deployer push HTTP %s (attempt %d): %s" % (code, n, msg))
         log.warning(kv(event="shc_push_retry", attempt=n, status=code, msg=msg[:200]))
         time.sleep(30)
     log.info(kv(event="shc_push", result="ok", target=target, attempts=n,
-                note="uyeler gerekiyorsa rolling restart yapar (Splunk davranisi)"))
+                note="members do a rolling restart if needed (Splunk behaviour)"))
     return {"result": "pushed", "target": target}
 
 
@@ -691,15 +691,15 @@ def get_session(conf, args):
     if args.cmd == "run":
         key = sys.stdin.readline().strip()
         if not key:
-            raise GitopsError("passAuth oturum anahtari gelmedi (inputs.conf passAuth?)")
+            raise GitopsError("no passAuth session key received (inputs.conf passAuth?)")
         sp.key = key
         return sp
     auth = os.environ.get("GITOPS_SPLUNK_AUTH")
     if auth and ":" in auth:
         u, p = auth.split(":", 1)
     else:
-        u = input("Splunk kullanicisi: ")
-        p = getpass.getpass("Splunk sifresi: ")
+        u = input("Splunk user: ")
+        p = getpass.getpass("Splunk password: ")
     sp.login(u, p)
     return sp
 
@@ -716,14 +716,14 @@ def token_check(conf, gl):
     log.log(lvl, kv(event="token_check", token_name=(info or {}).get("name"), expires=exp, days_left=days, source=src,
                     scopes=",".join((info or {}).get("scopes") or [])))
     if days is not None and days <= warn:
-        log.warning(kv(event="token_expiring", days_left=days, msg="token %s gun icinde bitiyor, yenileyin" % days))
+        log.warning(kv(event="token_expiring", days_left=days, msg="token expires in %s days, renew it" % days))
     return info, exp, days
 
 
 def cmd_set_token(conf, sp):
     tok = getpass.getpass("GitLab token: ") if sys.stdin.isatty() else sys.stdin.readline().strip()
     if not tok:
-        raise GitopsError("bos token")
+        raise GitopsError("empty token")
     sp.set_secret("gitlab_token", tok)
     gl = GitLab(conf, tok)
     try:
@@ -747,7 +747,7 @@ def cmd_status(conf, sp, st):
         try:
             ok, why = cm_gate(conf, sp, meta["cm_ha"] if meta else None)
         except GitopsError as e:
-            ok, why = False, "HATA: %s" % e
+            ok, why = False, "ERROR: %s" % e
         active = cm_bundle(sp)[1] if ok else None  # a standby CM returns 503 on cluster/manager/info
         log.info(kv(event="cm_state", writable=ok, state=why, active_bundle=active))
     try:
@@ -776,7 +776,7 @@ def run(conf, args, sp):
     BASE = meta["base"]
     mode = args.cmd if args.cmd != "run" else conf.get("mode", "plan")
     if mode not in ("plan", "stage", "apply"):
-        raise GitopsError("mode %s gecersiz" % mode)
+        raise GitopsError("invalid mode %s" % mode)
     gate_ok, gate_why = True, ""
     if conf["role"] == "cm":
         gate_ok, gate_why = cm_gate(conf, sp, meta["cm_ha"])
@@ -809,7 +809,7 @@ def run(conf, args, sp):
         ch = changed(items)
         if mode == "stage":
             for i in [i for i in ch if i["op"] == "drift"]:
-                log.warning(kv(event="drift", dest=d, app=i["app"], msg="diskte elle degistirilmis; stage ezmez, apply Git'teki haliyle ezer"))
+                log.warning(kv(event="drift", dest=d, app=i["app"], msg="modified by hand on disk; stage does not overwrite, apply overwrites it with the Git version"))
             ch = [i for i in ch if i["op"] != "drift"]
         if ch:
             os.makedirs(dd, exist_ok=True)  # do not create an unused dest directory (e.g. master-apps) for nothing
@@ -827,7 +827,7 @@ def run(conf, args, sp):
             if d == "etc_apps" and hint:
                 ds["restart_recommended"] = hint
                 log.warning(kv(event="restart_recommended", dest=d, confs=",".join(hint),
-                               msg="bu sunucuda splunkd restart gerekebilir; script restart yapmaz"))
+                               msg="splunkd on this server may need a restart; the script does not restart"))
         ds["apps"] = {i["app"]: i["git"] for i in items if i["op"] != "remove"}
         if mode == "stage":  # in stage, keep the old hash of a drifted app that was not overwritten
             for i in items:
@@ -861,11 +861,11 @@ def run(conf, args, sp):
 
 
 def pending_msg(d):
-    return {"manager_apps": "elle: splunk validate cluster-bundle --check-restart; splunk apply cluster-bundle",
-            "master_apps": "elle: splunk validate cluster-bundle --check-restart; splunk apply cluster-bundle",
-            "shcluster_apps": "elle: splunk apply shcluster-bundle -target <uye>",
-            "deployment_apps": "elle: splunk reload deploy-server",
-            "etc_apps": "etc/apps yazildi; gerekiyorsa restart elle"}[d]
+    return {"manager_apps": "manual: splunk validate cluster-bundle --check-restart; splunk apply cluster-bundle",
+            "master_apps": "manual: splunk validate cluster-bundle --check-restart; splunk apply cluster-bundle",
+            "shcluster_apps": "manual: splunk apply shcluster-bundle -target <member>",
+            "deployment_apps": "manual: splunk reload deploy-server",
+            "etc_apps": "etc/apps written; restart by hand if needed"}[d]
 
 
 def action_key(conf, d):
@@ -892,8 +892,8 @@ def do_action(conf, sp, d):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="run", choices=["status", "plan", "stage", "apply", "set-token", "run"])
-    ap.add_argument("--sha", help="branch yerine bu commit")
-    ap.add_argument("--only", choices=list(DESTS), help="yalniz bu hedef")
+    ap.add_argument("--sha", help="use this commit instead of the branch")
+    ap.add_argument("--only", choices=list(DESTS), help="only this dest")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     setup_logging(console=args.cmd != "run")
@@ -902,12 +902,12 @@ def main():
     try:
         fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        log.error(kv(event="locked", msg="baska bir gitops calismasi suruyor"))
+        log.error(kv(event="locked", msg="another gitops run is in progress"))
         return 3
     try:
         conf = load_conf()
         if args.only and args.only not in ROLE_DESTS[conf["role"]]:
-            raise GitopsError("%s rolunde %s hedefi yok" % (conf["role"], args.only))
+            raise GitopsError("role %s has no %s dest" % (conf["role"], args.only))
         sp = get_session(conf, args)
         log.info(kv(event="run_start", cmd=args.cmd, splunk_user=sp.user, host_id=conf["host_id"], role=conf["role"],
                     sha=args.sha, only=args.only))

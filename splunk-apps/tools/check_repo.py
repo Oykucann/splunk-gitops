@@ -36,7 +36,7 @@ def main():
     try:
         import yaml
     except ImportError:
-        print("HATA PyYAML yok: pip install pyyaml")
+        print("ERROR PyYAML missing: pip install pyyaml")
         return 1
     g = load_gitops()
     errors, warns = [], []
@@ -46,7 +46,7 @@ def main():
     inv_files = ([INV] if os.path.isfile(os.path.join(ROOT, INV)) else []) + \
         sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, "envs", "*", INV)))
     if not inv_files:
-        print("HATA envanter yok: %s ya da envs/<ortam>/%s" % (INV, INV))
+        print("ERROR no inventory: %s or envs/<env>/%s" % (INV, INV))
         return 1
 
     for fn in inv_files:
@@ -55,7 +55,7 @@ def main():
             with open(os.path.join(ROOT, fn)) as f:
                 t = yaml.safe_load(f) or {}
         except (OSError, yaml.YAMLError) as e:
-            errors.append("%s okunamadı: %s" % (fn, e))
+            errors.append("cannot read %s: %s" % (fn, e))
             continue
         hosts = []
         for rname, r in (t.get("roles") or {}).items():
@@ -71,7 +71,7 @@ def main():
         seen = {}
         for h, rname in hosts:
             if h in seen:
-                errors.append("%s: %s iki rolde birden: %s, %s" % (fn, h, seen[h], rname))
+                errors.append("%s: %s is in two roles: %s, %s" % (fn, h, seen[h], rname))
             seen[h] = rname
         nhosts += len(hosts)
         # The server-side script's check, per host (whether the path is right is checked on the server itself)
@@ -92,20 +92,20 @@ def main():
         if not os.path.isdir(p) or a.startswith("."):
             continue
         if not os.path.isfile(os.path.join(p, "default", "app.conf")):
-            warns.append("%s: default/app.conf yok" % a)
+            warns.append("%s: default/app.conf missing" % a)
         if a not in used:
-            warns.append("%s: apps/ altında ama hiçbir envanterde atanmamış" % a)
+            warns.append("%s: under apps/ but not assigned in any inventory" % a)
         for d, dirs, files in os.walk(p):
             rel = os.path.relpath(d, apps_dir)
             if "local" in dirs:
-                warns.append("%s/local/: yalnızca manager/deployment/shcluster app'lerinde kabul edilir; ayarları default/'a taşıyın" % rel)
-            for fn in inv_files:
+                warns.append("%s/local/: only accepted in manager/deployment/shcluster apps; move the settings to default/" % rel)
+            for fn in files:
                 fp = os.path.join(d, fn)
                 rp = os.path.relpath(fp, apps_dir)
                 if fn == "local.meta":
-                    errors.append("%s: local.meta Git'e girmez" % rp)
+                    errors.append("%s: local.meta must not be in Git" % rp)
                 if os.path.islink(fp):
-                    errors.append("%s: symlink kabul edilmez" % rp)
+                    errors.append("%s: symlinks are not allowed" % rp)
                 if not fn.endswith(".conf"):
                     continue
                 try:
@@ -115,17 +115,17 @@ def main():
                             if not (m and m.group(2).strip()):
                                 continue
                             if re.match(r"\$\d+\$", m.group(2).strip()):
-                                warns.append("%s:%d: %s şifreli ($N$) duruyor; o sunucunun splunk.secret'ı ile çözülür, gerçekten gerekli mi?" % (rp, n, m.group(1)))
+                                warns.append("%s:%d: %s is stored encrypted ($N$); it only decrypts with that server's splunk.secret, is it really needed?" % (rp, n, m.group(1)))
                             else:
-                                errors.append("%s:%d: %s düz metin; gizli bilgi Git'e girmez" % (rp, n, m.group(1)))
+                                errors.append("%s:%d: %s in plain text; secrets must not be in Git" % (rp, n, m.group(1)))
                 except OSError as e:
-                    errors.append("%s: okunamadı (%s)" % (rp, e))
+                    errors.append("%s: cannot read (%s)" % (rp, e))
 
     for w in warns:
-        print("UYARI", w)
+        print("WARN ", w)
     for e in errors:
-        print("HATA ", e)
-    print("\n%d envanter, %d host, %d atanmış app, %d uyarı, %d hata" % (len(inv_files), nhosts, len(used), len(warns), len(errors)))
+        print("ERROR", e)
+    print("\n%d inventories, %d hosts, %d assigned apps, %d warnings, %d errors" % (len(inv_files), nhosts, len(used), len(warns), len(errors)))
     return 1 if errors else 0
 
 
