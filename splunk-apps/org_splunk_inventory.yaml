@@ -1,0 +1,50 @@
+# org_splunk_inventory.yaml: which server gets which app, into which directory.
+#
+# Rules:
+#  - A role-level list goes to every host in that role; a list under a host is added to it.
+#  - The host name must match host_id in that server's local/gitops.conf exactly.
+#  - Every listed app must exist under apps/<name>/; otherwise the run stops and the disk is untouched.
+#  - An app going to etc_apps must not contain local/ or metadata/local.meta.
+#  - An app removed from a list is deleted only if the script installed it.
+#
+# Directory = <path> + dest:
+#   manager_apps    → <path>/etc/manager-apps     (cm, Splunk 9.x)
+#   master_apps     → <path>/etc/master-apps      (cm, legacy name; cannot be combined with manager_apps)
+#   deployment_apps → <path>/etc/deployment-apps  (ds)
+#   shcluster_apps  → <path>/etc/shcluster/apps   (deployer)
+#   etc_apps        → <path>/etc/apps             (all roles)
+# path precedence: path under the host > path under the role > default_path.
+# The script checks that path is the directory of the Splunk running on that server; if not, it stops.
+
+version: 1
+default_path: /data/splunk
+
+roles:
+  cm:
+    # yes: active-passive pair. Only the active CM writes manager-apps and applies; the standby skips.
+    # no : each CM is the only CM of its own cluster; every listed CM writes and applies to its own cluster.
+    #      If a CM turns out to be a standby while this says no, the run stops (two CMs must not apply to one cluster).
+    cm_ha_availability: yes
+    hosts: [cm01, cm02]
+    manager_apps: []        # e.g. org_all_indexes, org_idx_props
+    etc_apps: []            # e.g. org_cm_base (goes to both CMs)
+
+  ds:
+    hosts:
+      ds01:                 # site1 clients
+        deployment_apps: [] # e.g. org_uf_outputs_site1
+        etc_apps: []        # e.g. org_ds01_serverclass
+      ds02:                 # site2 clients
+        deployment_apps: [] # e.g. org_uf_outputs_site2
+        etc_apps: []        # e.g. org_ds02_serverclass
+    deployment_apps: []     # shared by both DSs; e.g. org_uf_linux_inputs
+    etc_apps: []            # shared by both DSs; e.g. org_ds_base
+
+  deployer:
+    hosts: [shcdeployer01]
+    shcluster_apps: []      # goes to the SHC members; e.g. org_sh_base, org_sh_dashboards
+    etc_apps: []            # the deployer itself; e.g. org_deployer_base
+
+  sh:
+    hosts: [sh01, sh02]     # standalone SHs outside the SHC
+    etc_apps: []            # e.g. org_sh_base

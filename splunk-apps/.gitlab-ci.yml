@@ -1,0 +1,10 @@
+# Repo check on MRs. Does not connect to servers and deploys nothing.
+# If your GitLab has no runner, delete this file; otherwise the pipeline stays "pending".
+check:
+  image: python:3.11-slim
+  script:
+    - pip install --quiet pyyaml
+    - python3 tools/check_repo.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

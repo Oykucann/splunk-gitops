@@ -1,0 +1,22 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Server-specific, never in Git
+local.meta
+tools/org_gitops_app/local/
+
+# Files that may carry secrets
+passwords.conf
+*.pem
+*.key
+*.p12
+.secrets*

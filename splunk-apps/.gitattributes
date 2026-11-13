@@ -1,0 +1,14 @@
+# Splunk runs on Linux: keep all text files as LF.
+* text=auto eol=lf
+*.py   text eol=lf
+*.sh   text eol=lf
+*.conf text eol=lf
+*.meta text eol=lf
+*.xml  text eol=lf
+*.spl  binary
+*.tgz  binary
+*.tar.gz binary
+*.png  binary
+*.gif  binary
+*.jpg  binary
+*.svg  text eol=lf
