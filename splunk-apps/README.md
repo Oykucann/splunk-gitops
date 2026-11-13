@@ -76,6 +76,17 @@ $G stage     # writes to disk, no push/apply
 
 To roll back, either open an MR with `git revert` or, in an emergency, run `$G apply --sha <old_commit>` on the server.
 
+## Testing a new inventory before merging
+
+Push it to a branch and run, on the server:
+
+```bash
+$G status --branch <branch> --inventory envs/<env>/org_splunk_inventory.yaml
+$G plan   --branch <branch> --inventory envs/<env>/org_splunk_inventory.yaml
+```
+
+These only read; `stage` and `apply` refuse `--branch` and `--inventory`. `main` and the main inventory are untouched.
+
 ## Updating `tools/org_gitops_app`
 
 The script lives in the repo but does not deploy itself. Copy the new version to each server by hand. Do not touch `local/`; that is where `gitops.conf` and the token live. Then:

@@ -13,6 +13,8 @@ Commands:
   run         scripted input mode: plan/stage/apply according to `mode` in gitops.conf
 
 Options: --sha <commit> (a specific commit, e.g. for rollback), --only <dest>
+         --inventory <path> / --branch <name>: test another inventory or an unmerged branch
+         (status and plan only; nothing is written)
 Auth: the passAuth session key when run as a scripted input. When run by hand the Splunk user
 is prompted for; for automation the GITOPS_SPLUNK_AUTH=user:password environment variable is read.
 """
@@ -889,11 +891,33 @@ def do_action(conf, sp, d):
     return {}
 
 
+def apply_test_overrides(conf, args):
+    """--inventory / --branch: test another inventory or an unmerged branch without touching
+    gitops.conf or the main inventory. Read-only commands only, so unreviewed content
+    can never be written to disk or deployed."""
+    if not (args.inventory or args.branch):
+        return
+    if args.cmd not in ("status", "plan"):
+        raise GitopsError("--inventory and --branch are only allowed with status and plan")
+    if args.inventory:
+        inv = args.inventory.strip().lstrip("/")
+        if not inv or ".." in PurePosixPath(inv).parts:
+            raise GitopsError("--inventory must be a path inside the repo")
+        conf["inventory_file"] = inv
+    if args.branch:
+        if args.sha:
+            raise GitopsError("use either --branch or --sha, not both")
+        conf["branch"] = args.branch.strip()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="run", choices=["status", "plan", "stage", "apply", "set-token", "run"])
     ap.add_argument("--sha", help="use this commit instead of the branch")
     ap.add_argument("--only", choices=list(DESTS), help="only this dest")
+    ap.add_argument("--inventory", help="read this inventory file instead of inventory_file (status/plan only), "
+                                        "e.g. envs/test/org_splunk_inventory.yaml")
+    ap.add_argument("--branch", help="read this branch instead of the configured one (status/plan only)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     setup_logging(console=args.cmd != "run")
@@ -906,11 +930,12 @@ def main():
         return 3
     try:
         conf = load_conf()
+        apply_test_overrides(conf, args)
         if args.only and args.only not in ROLE_DESTS[conf["role"]]:
             raise GitopsError("role %s has no %s dest" % (conf["role"], args.only))
         sp = get_session(conf, args)
         log.info(kv(event="run_start", cmd=args.cmd, splunk_user=sp.user, host_id=conf["host_id"], role=conf["role"],
-                    sha=args.sha, only=args.only))
+                    sha=args.sha, only=args.only, inventory_override=args.inventory, branch_override=args.branch))
         if args.cmd == "set-token":
             return cmd_set_token(conf, sp) or 0
         return run(conf, args, sp) or 0

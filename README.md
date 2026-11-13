@@ -111,8 +111,30 @@ Shorthand: `G="/data/splunk/bin/splunk cmd python3 /data/splunk/etc/apps/org_git
 | `$G apply` | Writes and runs the role's action |
 | `$G apply --only manager_apps` | A single dest |
 | `$G apply --sha <commit>` | A specific commit; for emergency rollback |
+| `$G status --inventory envs/test/org_splunk_inventory.yaml` | Read another inventory instead of `inventory_file` (status/plan only) |
+| `$G plan --branch test/connection --inventory envs/test/org_splunk_inventory.yaml` | Test an unmerged branch and its inventory (status/plan only) |
 
 When run by hand, the Splunk user and password are prompted for. The person who ran it is recorded in `_audit` and in the log.
+
+### Testing a connection or a new inventory without touching the main one
+
+`--inventory` and `--branch` let you point a single run at another inventory file or another branch. `gitops.conf`, the main inventory and `main` stay untouched. These options only work with `status` and `plan`; `stage` and `apply` refuse them, so content that has not gone through an MR can never be written to disk.
+
+1. Push the test inventory to a branch (no MR or merge needed):
+   ```bash
+   git switch -c test/connection
+   mkdir -p envs/test && vi envs/test/org_splunk_inventory.yaml
+   git add envs/test && git commit -m "test inventory" && git push -u origin test/connection
+   ```
+2. On the server:
+   ```bash
+   $G status --branch test/connection --inventory envs/test/org_splunk_inventory.yaml
+   $G plan   --branch test/connection --inventory envs/test/org_splunk_inventory.yaml
+   ```
+   `status` shows GitLab access, the token, the branch head and whether the inventory is valid for this host. `plan` shows what *would* change compared with what is on disk now. An app missing from the test inventory therefore shows up as `remove`, but nothing is written.
+3. Delete the branch when you are done.
+
+For a permanent switch to an environment inventory, set `inventory_file = envs/<env>/org_splunk_inventory.yaml` in `local/gitops.conf` instead.
 
 ### Manual push in phase 1
 
